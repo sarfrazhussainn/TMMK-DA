@@ -9,10 +9,7 @@ import re
 import os
 import tempfile
 import time
-try:
-    from google import genai
-except ImportError:
-    import google.generativeai as genai
+import google.generativeai as genai
 import json
 import plotly.graph_objects as go
 import hashlib
@@ -647,4 +644,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
