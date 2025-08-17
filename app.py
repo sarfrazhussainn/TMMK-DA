@@ -125,7 +125,7 @@ def detect_boxes(page_img, page_num=1):
         st.error(f"Box detection error: {e}")
         return []
 
-def process_pdf_opencv(pdf_file, dpi=300, padding=10):
+def process_pdf_opencv(pdf_file, dpi=200, padding=10):
     """Process PDF using OpenCV approach"""
     if not OCR_AVAILABLE:
         st.error("OCR functionality not available. Please check system dependencies.")
@@ -602,3 +602,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
