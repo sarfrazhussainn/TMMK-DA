@@ -408,8 +408,8 @@ def main():
         st.header("Muslim Name Analysis")
         
         # API Key input
-        api_key = st.text_input("Google Gemini API Key", type="password", 
-                               help="Enter your Google Gemini API key for Muslim name analysis")
+        api_key = st.text_input("API Key", type="password", 
+                               help="Enter your API key for Muslim name analysis")
         
         if 'extracted_df' not in st.session_state:
             st.warning("⚠️ Please process a PDF first in the PDF Processing tab.")
@@ -420,7 +420,7 @@ def main():
         st.info(f"📄 Current file: {current_file}")
         
         if not api_key:
-            st.warning("⚠️ Please enter your Google Gemini API key above.")
+            st.warning("⚠️ Please enter your API key above.")
             return
         
         # Initialize Gemini client
@@ -647,3 +647,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
