@@ -27,6 +27,18 @@ except ImportError:
     st.error("Google Generative AI not available")
 
 from PIL import Image
+import gc
+
+# ---- Memory Management ----
+def cleanup_memory():
+    """Force garbage collection to free memory"""
+    gc.collect()
+
+def get_memory_usage():
+    """Get current memory usage info"""
+    import psutil
+    process = psutil.Process()
+    return process.memory_info().rss / 1024 / 1024  # MB
 
 # ---- Configuration ----
 st.set_page_config(page_title="TMMK Data Analysis", layout="wide")
@@ -125,61 +137,137 @@ def detect_boxes(page_img, page_num=1):
         st.error(f"Box detection error: {e}")
         return []
 
-def process_pdf_opencv(pdf_file, dpi=300, padding=10):
-    """Process PDF using OpenCV approach"""
+def process_pdf_opencv(pdf_file, dpi=300, padding=10, max_pages=50):
+    """Process PDF using OpenCV approach with memory optimization"""
     if not OCR_AVAILABLE:
         st.error("OCR functionality not available. Please check system dependencies.")
         return []
     
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(pdf_file.read())
-        tmp_file_path = tmp_file.name
+    # Check file size first
+    file_size_mb = len(pdf_file.getvalue()) / (1024 * 1024)
+    if file_size_mb > 50:
+        st.error(f"File too large ({file_size_mb:.1f}MB). Please use files smaller than 50MB or reduce DPI.")
+        return []
     
+    # Adjust DPI for large files
+    if file_size_mb > 20:
+        dpi = min(dpi, 200)
+        st.warning(f"Large file detected ({file_size_mb:.1f}MB). Reducing DPI to {dpi} for better performance.")
+    
+    tmp_file_path = None
     try:
-        pages = convert_from_path(tmp_file_path, dpi=dpi)
+        # Create temporary file with better cleanup
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(pdf_file.read())
+            tmp_file_path = tmp_file.name
+        
+        # Process pages in smaller batches to manage memory
+        try:
+            # First, get page count without loading all pages
+            import fitz  # PyMuPDF as fallback for page counting
+            doc = fitz.open(tmp_file_path)
+            total_pages = len(doc)
+            doc.close()
+        except:
+            # Fallback: load all pages to count
+            pages_temp = convert_from_path(tmp_file_path, dpi=150, first_page=1, last_page=1)
+            total_pages = len(convert_from_path(tmp_file_path, dpi=150))
+            del pages_temp
+        
+        if total_pages > max_pages:
+            st.warning(f"PDF has {total_pages} pages. Processing first {max_pages} pages only.")
+            total_pages = max_pages
+        
         all_data = []
-
         progress_bar = st.progress(0)
         status_text = st.empty()
-
-        for page_num, page in enumerate(pages, start=1):
-            status_text.text(f"Processing page {page_num}/{len(pages)}...")
+        
+        # Process pages in batches to manage memory
+        batch_size = min(5, total_pages)  # Process 5 pages at a time
+        
+        for batch_start in range(1, total_pages + 1, batch_size):
+            batch_end = min(batch_start + batch_size - 1, total_pages)
             
-            boxes = detect_boxes(page, page_num)
-
-            for (x, y, w, h) in boxes:
-                # Add padding to avoid cutting text
-                crop_box = (
-                    max(0, x - padding),
-                    max(0, y - padding),
-                    x + w + padding,
-                    y + h + padding
+            status_text.text(f"Loading pages {batch_start} to {batch_end}...")
+            
+            try:
+                # Load batch of pages
+                pages = convert_from_path(
+                    tmp_file_path, 
+                    dpi=dpi, 
+                    first_page=batch_start, 
+                    last_page=batch_end
                 )
-                cropped = page.crop(crop_box)
-                text = extract_text_from_box(cropped)
-
-                if text:
-                    parsed = parse_voter_box(text)
-                    # Only add if at least one name is found
-                    if parsed["Name"] or parsed["Relative Name"]:
-                        all_data.append(parsed)
-            
-            progress_bar.progress(page_num / len(pages))
-
+                
+                for i, page in enumerate(pages):
+                    page_num = batch_start + i
+                    status_text.text(f"Processing page {page_num}/{total_pages}...")
+                    
+                    try:
+                        boxes = detect_boxes(page, page_num)
+                        
+                        for (x, y, w, h) in boxes:
+                            # Add padding to avoid cutting text
+                            crop_box = (
+                                max(0, x - padding),
+                                max(0, y - padding),
+                                min(page.width, x + w + padding),
+                                min(page.height, y + h + padding)
+                            )
+                            
+                            try:
+                                cropped = page.crop(crop_box)
+                                text = extract_text_from_box(cropped)
+                                
+                                if text:
+                                    parsed = parse_voter_box(text)
+                                    if parsed["Name"] or parsed["Relative Name"]:
+                                        all_data.append(parsed)
+                                        
+                                # Clean up cropped image
+                                del cropped
+                                
+                            except Exception as crop_error:
+                                st.warning(f"Error processing box on page {page_num}: {crop_error}")
+                                continue
+                    
+                    except Exception as page_error:
+                        st.warning(f"Error processing page {page_num}: {page_error}")
+                        continue
+                    
+                    finally:
+                        # Clean up page
+                        del page
+                    
+                    progress_bar.progress(page_num / total_pages)
+                
+                # Clean up batch
+                del pages
+                
+            except Exception as batch_error:
+                st.error(f"Error processing batch {batch_start}-{batch_end}: {batch_error}")
+                break
+        
         progress_bar.empty()
         status_text.empty()
         
         return all_data
-
+        
     except Exception as e:
         st.error(f"PDF processing error: {e}")
         return []
+    
     finally:
-        # Clean up temporary file
-        try:
-            os.unlink(tmp_file_path)
-        except:
-            pass
+        # Always clean up temporary file
+        if tmp_file_path and os.path.exists(tmp_file_path):
+            try:
+                os.unlink(tmp_file_path)
+            except Exception as cleanup_error:
+                st.warning(f"Could not clean up temporary file: {cleanup_error}")
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
 
 # ---- Muslim Name Analysis Functions ----
 def extract_muslim_names(names, api_key):
@@ -343,8 +431,11 @@ def main():
     
     # PDF processing parameters
     st.sidebar.subheader("PDF Processing Parameters")
-    dpi = st.sidebar.number_input("DPI (Image Resolution)", value=300, min_value=150, max_value=600, step=50)
+    dpi = st.sidebar.number_input("DPI (Image Resolution)", value=300, min_value=150, max_value=600, step=50,
+                                 help="Lower DPI for large files to reduce memory usage")
     padding = st.sidebar.number_input("Box Padding", value=10, min_value=5, max_value=30)
+    max_pages = st.sidebar.number_input("Max Pages to Process", value=50, min_value=1, max_value=200,
+                                       help="Limit pages to process for large PDFs")
     
     # Analysis parameters
     st.sidebar.subheader("Analysis Parameters")
@@ -368,13 +459,28 @@ def main():
             
             if uploaded_file is not None:
                 st.success(f"File uploaded: {uploaded_file.name}")
-                st.info(f"File size: {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
+                file_size_mb = len(uploaded_file.getvalue()) / (1024*1024)
+                st.info(f"File size: {file_size_mb:.2f} MB")
+                
+                # Show warnings for large files
+                if file_size_mb > 50:
+                    st.error("⚠️ File too large! Please use files smaller than 50MB.")
+                    st.info("💡 **Tips for large files:**")
+                    st.info("• Split PDF into smaller parts")  
+                    st.info("• Reduce quality when scanning")
+                    st.info("• Use CSV upload instead")
+                    return
+                elif file_size_mb > 20:
+                    st.warning("⚠️ Large file detected. Processing may take longer and use more memory.")
+                    st.info("💡 **Recommendations:**")
+                    st.info("• Consider reducing DPI to 200-250")
+                    st.info("• Limit max pages in sidebar settings")
                 
                 if st.button("🔍 Process PDF", type="primary"):
                     with st.spinner("Processing PDF with OpenCV detection..."):
                         try:
                             uploaded_file.seek(0)
-                            extracted_data = process_pdf_opencv(uploaded_file, dpi=dpi, padding=padding)
+                            extracted_data = process_pdf_opencv(uploaded_file, dpi=dpi, padding=padding, max_pages=max_pages)
                             
                             if extracted_data:
                                 st.success(f"✅ PDF processed successfully! Found {len(extracted_data)} name records.")
