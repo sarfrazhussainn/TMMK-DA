@@ -9,26 +9,28 @@ import re
 import os
 import tempfile
 import time
-from google import genai
+try:
+    from google import genai
+except ImportError:
+    import google.generativeai as genai
 import json
 import plotly.graph_objects as go
 import hashlib
 
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
+# Remove Windows-specific Tesseract path - not needed on Linux cloud servers
+# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # ---- Configuration ----
-st.set_page_config(page_title="TMMK Data Analysis", layout="wide")
-
-# Set Tesseract path (adjust this based on your system)
-# For Windows:
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-# For Linux/Mac, it's usually in PATH
+st.set_page_config(page_title="Voter Data Analysis", layout="wide")
 
 # ---- PDF Processing Functions (from voterr.py) ----
 def extract_text_from_box(image):
     """Run OCR on a cropped box."""
-    return pytesseract.image_to_string(image, lang="eng").strip()
+    try:
+        return pytesseract.image_to_string(image, lang="eng").strip()
+    except Exception as e:
+        st.error(f"OCR Error: {e}")
+        return ""
 
 def parse_voter_box(text):
     """Extract only Name and Relative Name from OCR text."""
@@ -71,37 +73,41 @@ def merge_boxes(boxes):
 
 def detect_boxes(page_img, page_num=1):
     """Detect main voter boxes using OpenCV with merging."""
-    img_cv = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    try:
+        img_cv = cv2.cvtColor(np.array(page_img), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # Invert & threshold
-    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+        # Invert & threshold
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
 
-    # Dilate to connect edges
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
-    dilated = cv2.dilate(thresh, kernel, iterations=2)
+        # Dilate to connect edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+        dilated = cv2.dilate(thresh, kernel, iterations=2)
 
-    # Find contours
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Get page size for scaling detection
-    ph, pw = gray.shape
-    min_w, max_w = pw * 0.15, pw * 0.40
-    min_h, max_h = ph * 0.04, ph * 0.12
+        # Get page size for scaling detection
+        ph, pw = gray.shape
+        min_w, max_w = pw * 0.15, pw * 0.40
+        min_h, max_h = ph * 0.04, ph * 0.12
 
-    boxes = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        if min_w < w < max_w and min_h < h < max_h:
-            boxes.append((x, y, w, h))
+        boxes = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            if min_w < w < max_w and min_h < h < max_h:
+                boxes.append((x, y, w, h))
 
-    # Merge boxes to avoid splits
-    boxes = merge_boxes(sorted(boxes, key=lambda b: (b[1], b[0])))
+        # Merge boxes to avoid splits
+        boxes = merge_boxes(sorted(boxes, key=lambda b: (b[1], b[0])))
 
-    # Sort top-to-bottom, left-to-right
-    boxes = sorted(boxes, key=lambda b: (b[1] // 50, b[0]))
+        # Sort top-to-bottom, left-to-right
+        boxes = sorted(boxes, key=lambda b: (b[1] // 50, b[0]))
 
-    return boxes
+        return boxes
+    except Exception as e:
+        st.error(f"Box detection error: {e}")
+        return []
 
 def process_pdf_opencv(pdf_file, dpi=300, padding=10):
     """Process PDF using OpenCV approach from voterr.py"""
@@ -145,6 +151,9 @@ def process_pdf_opencv(pdf_file, dpi=300, padding=10):
         
         return all_data
 
+    except Exception as e:
+        st.error(f"PDF processing error: {e}")
+        return []
     finally:
         # Clean up temporary file
         try:
@@ -165,11 +174,18 @@ def extract_muslim_names(names, client):
     )
     
     try:
-        resp = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
-        text = resp.text.strip()
+        # Try the new API structure first
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            resp = model.generate_content(prompt)
+            text = resp.text.strip()
+        except:
+            # Fallback to old structure
+            resp = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=prompt
+            )
+            text = resp.text.strip()
         
         # Clean the response text
         if text.startswith('```json'):
@@ -281,8 +297,19 @@ def create_pie_chart(extracted_df, muslim_names):
 
 # ---- Main Streamlit App ----
 def main():
-    st.title("TMMK Data Analysis")
+    st.title("Voter Data Analysis")
+    st.markdown("Extract names from voter PDFs, analyze Muslim names, and visualize data")
     st.markdown("---")
+    
+    # Add system info for debugging
+    if st.sidebar.checkbox("Show System Info", False):
+        st.sidebar.write("**System Information:**")
+        st.sidebar.write(f"OpenCV version: {cv2.__version__}")
+        st.sidebar.write(f"Streamlit version: {st.__version__}")
+        try:
+            st.sidebar.write(f"Tesseract available: {pytesseract.get_tesseract_version()}")
+        except:
+            st.sidebar.write("Tesseract: Not accessible")
     
     # Sidebar for configuration
     st.sidebar.header("⚙️ Configuration")
@@ -398,13 +425,12 @@ def main():
         
         # Initialize Gemini client
         try:
-            client = genai.Client(api_key=api_key)
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
             # Test the client with a simple message
-            test_response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents="Test"
-            )
+            test_response = model.generate_content("Test")
             st.success("✅ Gemini API connection successful!")
+            client = genai  # For compatibility with existing code
         except Exception as e:
             st.error(f"❌ Error initializing Gemini client: {e}")
             return
